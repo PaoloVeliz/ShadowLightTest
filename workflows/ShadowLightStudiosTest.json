@@ -1,0 +1,662 @@
+{
+  "name": "ShadowLightStudiosTest",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// Loop over input items and add a new field called 'myNewField' to the JSON of each one\nconst q = String($json.query?.q || '').toLowerCase().trim();\nconst m = q.match(/between\\s*(\\d{4}-\\d{2}-\\d{2})\\s*(?:and|to|-)\\s*(\\d{4}-\\d{2}-\\d{2})/);\nconst last30 = /last\\s*30\\s*days/.test(q);\nreturn [{ json: { question: q, start: m ? m[1] : null, end: m ? m[2] : null, needAnchor: last30 || !m } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        480
+      ],
+      "id": "dd56b728-268f-492e-9ef2-79ddcd4d3fcb",
+      "name": "Function (Parse Q)"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsed = $items('Function (Parse Q)', 0, 0)?.json ?? {};\nconst range  = items[0]?.json ?? {};\n\nconst start = parsed.start ?? range.start_date ?? null;\nconst end   = parsed.end   ?? range.end_date   ?? null;\nconst question = $('Function (Parse Q)').first().json.question ?? null;\n\nif (!start || !end) {\n  return [{ json: { error: 'Could not resolve start/end. Provide ?q=... with dates or ensure data exists for last 30 days.' } }];\n}\n\nreturn [{ json: { question, start, end } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        480
+      ],
+      "id": "b38d4f08-2b75-45fb-90f7-7f9fd73d1552",
+      "name": "Function (Unify Dates)"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = items[0].json;\nconst q = $('Function (Unify Dates)').first().json.question || $json.question || null;\n\nconst toNum = v => (v==null || v==='') ? null : Number(v);\nconst pctStr = v => v==null ? null : (Number(v)*100).toFixed(2) + '%';\nconst ymd = v => v ? String(v).slice(0,10) : null;\n\nconst note = (toNum(r.prior_spend)===0 && toNum(r.prior_conv)===0)\n  ? 'No prior data in prior window' : null;\n\nconst answer = [\n  `Comparing ${ymd(r.start_date)}–${ymd(r.end_date)} vs ${ymd(r.prior_start)}–${ymd(r.prior_end)}:`,\n  `• CAC: ${toNum(r.cac_curr)} vs ${r.cac_prior??'NA'} (Δ ${r.cac_delta_abs??'NA'}, ${pctStr(r.cac_delta_pct)??'NA'})`,\n  `• ROAS: ${toNum(r.roas_curr)} vs ${r.roas_prior??'NA'} (Δ ${r.roas_delta_abs??'NA'}, ${pctStr(r.roas_delta_pct)??'NA'})`,\n  note ? `Note: ${note}` : null\n].filter(Boolean).join('\\n');\n\nreturn [{\n  json: {\n    question: q,\n    period: {\n      start: ymd(r.start_date),\n      end: ymd(r.end_date),\n      prior_start: ymd(r.prior_start),\n      prior_end: ymd(r.prior_end),\n    },\n    kpis: {\n      cac: {\n        curr: toNum(r.cac_curr),\n        prior: toNum(r.cac_prior),\n        delta_abs: toNum(r.cac_delta_abs),\n        delta_pct: toNum(r.cac_delta_pct),\n        delta_pct_str: pctStr(r.cac_delta_pct),\n      },\n      roas: {\n        curr: toNum(r.roas_curr),\n        prior: toNum(r.roas_prior),\n        delta_abs: toNum(r.roas_delta_abs),\n        delta_pct: toNum(r.roas_delta_pct),\n        delta_pct_str: pctStr(r.roas_delta_pct),\n      }\n    },\n    context: {\n      spend: { curr: toNum(r.curr_spend), prior: toNum(r.prior_spend) },\n      conversions: { curr: toNum(r.curr_conv), prior: toNum(r.prior_conv) }\n    },\n    answer_text: answer,\n    note\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        480
+      ],
+      "id": "a7f41271-d7d2-4247-953c-085ea42ff4f2",
+      "name": "Function (Render Answer)"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH params AS (\n  SELECT CAST($1 AS DATE) AS start_date, CAST($2 AS DATE) AS end_date\n),\nbounds AS (\n  SELECT\n    start_date,\n    end_date,\n    (start_date - ((end_date - start_date) + 1))::date AS prior_start,\n    (start_date - 1)::date                             AS prior_end\n  FROM params\n),\nsums AS (\n  SELECT\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.start_date AND b.end_date   THEN a.spend       END),0)::numeric AS curr_spend,\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.start_date AND b.end_date   THEN a.conversions END),0)::numeric AS curr_conv,\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.prior_start AND b.prior_end THEN a.spend       END),0)::numeric AS prior_spend,\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.prior_start AND b.prior_end THEN a.conversions END),0)::numeric AS prior_conv,\n    MIN(b.start_date)  AS start_date,\n    MIN(b.end_date)    AS end_date,\n    MIN(b.prior_start) AS prior_start,\n    MIN(b.prior_end)   AS prior_end\n  FROM ads_spend a\n  CROSS JOIN bounds b\n)\nSELECT\n  start_date, end_date, prior_start, prior_end,\n  ROUND(curr_spend/NULLIF(curr_conv,0), 2)                                        AS cac_curr,\n  ROUND(prior_spend/NULLIF(prior_conv,0), 2)                                      AS cac_prior,\n  ROUND((curr_spend/NULLIF(curr_conv,0)) - (prior_spend/NULLIF(prior_conv,0)), 2) AS cac_delta_abs,\n  CASE WHEN (prior_spend/NULLIF(prior_conv,0)) IS NULL OR (prior_spend/NULLIF(prior_conv,0))=0 THEN NULL\n       ELSE ROUND( ((curr_spend/NULLIF(curr_conv,0)) - (prior_spend/NULLIF(prior_conv,0)))\n                  / (prior_spend/NULLIF(prior_conv,0)), 4)\n  END AS cac_delta_pct,\n  ROUND((curr_conv*100)/NULLIF(curr_spend,0), 2)                                   AS roas_curr,\n  ROUND((prior_conv*100)/NULLIF(prior_spend,0), 2)                                 AS roas_prior,\n  ROUND(((curr_conv*100)/NULLIF(curr_spend,0)) - ((prior_conv*100)/NULLIF(prior_spend,0)), 2) AS roas_delta_abs,\n  CASE WHEN ((prior_conv*100)/NULLIF(prior_spend,0)) IS NULL OR ((prior_conv*100)/NULLIF(prior_spend,0))=0 THEN NULL\n       ELSE ROUND( ( ((curr_conv*100)/NULLIF(curr_spend,0)) - ((prior_conv*100)/NULLIF(prior_spend,0)) )\n                  / ((prior_conv*100)/NULLIF(prior_spend,0)), 4)\n  END AS roas_delta_pct,\n  curr_spend, prior_spend, curr_conv, prior_conv\nFROM sums;\n",
+        "options": {
+          "queryReplacement": "={{ $json.start }},{{ $json.end }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        832,
+        480
+      ],
+      "id": "11580dd5-7dff-4951-8f63-e6fdb8594ea1",
+      "name": "Postgres – Metrics (SQL)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT (MAX(date) - INTERVAL '29 days')::date AS start_date,\n       MAX(date)::date                        AS end_date\nFROM ads_spend;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        432,
+        480
+      ],
+      "id": "b14c5204-1c42-4f31-ba47-d345c8044fbf",
+      "name": "Postgres (Get Range)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "35b4b2a7-a661-4b52-b5bc-8028c6e0d19b",
+      "name": "Manual Trigger — Ingest"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS staging_ads (\n  date TEXT,\n  platform TEXT,\n  account TEXT,\n  campaign TEXT,\n  country TEXT,\n  device TEXT,\n  spend TEXT,\n  clicks TEXT,\n  impressions TEXT,\n  conversions TEXT\n);\n\nCREATE TABLE IF NOT EXISTS ads_spend (\n  date DATE,\n  platform TEXT,\n  account TEXT,\n  campaign TEXT,\n  country TEXT,\n  device TEXT,\n  spend NUMERIC(18,2),\n  clicks INTEGER,\n  impressions BIGINT,\n  conversions INTEGER,\n  load_date TIMESTAMP,\n  source_file_name TEXT,\n  CONSTRAINT ads_spend_pk UNIQUE (date, platform, account, campaign, country, device)\n);\n\nCREATE TABLE IF NOT EXISTS load_log (\n  source_file_name TEXT PRIMARY KEY,\n  load_date TIMESTAMP\n);\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        240,
+        0
+      ],
+      "id": "a1292dcb-74a1-47d5-b20f-03959b52736f",
+      "name": "SQL — Create Tables (staging, ads_spend, load_log)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "399d394b-b00f-4873-8fa9-68468ae79be4",
+              "name": "csv_path",
+              "value": "/workspace/data/ads_spend.csv",
+              "type": "string"
+            },
+            {
+              "id": "485ad180-5bfe-42c1-a58c-6a054435d84a",
+              "name": "source_file_name",
+              "value": "ads_spend.csv",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        464,
+        0
+      ],
+      "id": "0bc910e3-1ea7-4525-aa3c-d8a0f4090b82",
+      "name": "Set Metadata (load_date, source_file_name)"
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.csv_path }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        688,
+        0
+      ],
+      "id": "2340f833-9346-4f0b-8ba5-89bc1a98d092",
+      "name": "Read File — CSV from Disk"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "=data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        944,
+        0
+      ],
+      "id": "e05e9747-dc55-4261-9af8-a1af0ab44de6",
+      "name": "Parse CSV → JSON (staging schema)"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "staging_ads",
+          "mode": "list",
+          "cachedResultName": "staging_ads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date": "={{ $json.date }}",
+            "platform": "={{ $json.platform }}",
+            "account": "={{ $json.account }}",
+            "campaign": "={{ $json.campaign }}",
+            "country": "={{ $json.country }}",
+            "device": "={{ $json.device }}",
+            "spend": "={{ $json.spend }}",
+            "clicks": "={{ $json.clicks }}",
+            "impressions": "={{ $json.impressions }}",
+            "conversions": "={{ $json.conversions }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "platform",
+              "displayName": "platform",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "account",
+              "displayName": "account",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "campaign",
+              "displayName": "campaign",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "country",
+              "displayName": "country",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "device",
+              "displayName": "device",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "spend",
+              "displayName": "spend",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "clicks",
+              "displayName": "clicks",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "impressions",
+              "displayName": "impressions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "conversions",
+              "displayName": "conversions",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1200,
+        0
+      ],
+      "id": "005ae738-9607-4dff-a96f-3ed0229fde32",
+      "name": "Insert → staging_ads (bulk)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ads_spend (\n  date, platform, account, campaign, country, device,\n  spend, clicks, impressions, conversions,\n  load_date, source_file_name\n)\nSELECT\n  CAST(NULLIF(date,'') AS DATE),\n  platform, account, campaign, country, device,\n  CAST(NULLIF(spend,'') AS NUMERIC(18,2)),\n  CAST(NULLIF(clicks,'') AS INTEGER),\n  CAST(NULLIF(impressions,'') AS BIGINT),\n  CAST(NULLIF(conversions,'') AS INTEGER),\n  NOW(),        \n  $1            \nFROM staging_ads\nON CONFLICT (date, platform, account, campaign, country, device) DO NOTHING;\n\n\nINSERT INTO load_log(source_file_name, load_date)\nVALUES ($1, NOW())\nON CONFLICT (source_file_name) DO NOTHING;\n\nTRUNCATE staging_ads;\n",
+        "options": {
+          "queryReplacement": "={{ $('Set Metadata (load_date, source_file_name)').item.json.source_file_name }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1424,
+        0
+      ],
+      "id": "2dd40fc7-0de2-4e49-afe7-8e0fc7ec81c6",
+      "name": "SQL — Merge to ads_spend (dedupe on natural key)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH anchor AS (\n  SELECT (MAX(date) + 1)::date AS anchor_end FROM ads_spend\n),\nbounds AS (\n  SELECT\n    (anchor_end - INTERVAL '30 days')::date AS last_start,\n    anchor_end                              AS last_end,\n    (anchor_end - INTERVAL '60 days')::date AS prior_start,\n    (anchor_end - INTERVAL '30 days')::date AS prior_end\n  FROM anchor\n),\nsums AS (\n  SELECT\n    COALESCE(SUM(CASE WHEN a.date >= b.last_start  AND a.date < b.last_end  THEN spend       END),0)::numeric AS last_spend,\n    COALESCE(SUM(CASE WHEN a.date >= b.last_start  AND a.date < b.last_end  THEN conversions END),0)::numeric AS last_conv,\n    COALESCE(SUM(CASE WHEN a.date >= b.prior_start AND a.date < b.prior_end THEN spend       END),0)::numeric AS prior_spend,\n    COALESCE(SUM(CASE WHEN a.date >= b.prior_start AND a.date < b.prior_end THEN conversions END),0)::numeric AS prior_conv\n  FROM ads_spend a\n  CROSS JOIN bounds b\n)\nSELECT\n  -- CAC\n  ROUND(last_spend/NULLIF(last_conv,0), 2)                                       AS cac_last_30,\n  ROUND(prior_spend/NULLIF(prior_conv,0), 2)                                     AS cac_prior_30,\n  ROUND((last_spend/NULLIF(last_conv,0))-(prior_spend/NULLIF(prior_conv,0)), 2)  AS cac_delta_abs,\n  CASE WHEN prior_conv IS NULL OR prior_conv=0 THEN NULL\n       ELSE ROUND( ((last_spend/NULLIF(last_conv,0))-(prior_spend/NULLIF(prior_conv,0))) / (prior_spend/NULLIF(prior_conv,0)), 4)\n  END AS cac_delta_pct,\n  -- ROAS (revenue = conv*100)\n  ROUND((last_conv*100)/NULLIF(last_spend,0), 2)                                  AS roas_last_30,\n  ROUND((prior_conv*100)/NULLIF(prior_spend,0), 2)                                AS roas_prior_30,\n  ROUND(((last_conv*100)/NULLIF(last_spend,0))-((prior_conv*100)/NULLIF(prior_spend,0)), 2) AS roas_delta_abs,\n  CASE WHEN prior_spend IS NULL OR prior_spend=0 THEN NULL\n       ELSE ROUND( ( ((last_conv*100)/NULLIF(last_spend,0)) - ((prior_conv*100)/NULLIF(prior_spend,0)) ) / ((prior_conv*100)/NULLIF(prior_spend,0)), 4)\n  END AS roas_delta_pct\nFROM sums;\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1664,
+        0
+      ],
+      "id": "8720556f-9ae4-4bb0-9297-aa21669b93c8",
+      "name": "SQL — Load Log & Counts (prove persistence)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "path": "/metrics",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        256
+      ],
+      "id": "877b361b-a614-4621-b3ee-9f745690aec5",
+      "name": "Webhook — /metrics (GET ?start&end)",
+      "webhookId": "b59d9d3a-4398-442c-854a-e84b5d675a7e"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH params AS (\n  SELECT \n    CAST($1 AS DATE) AS start_date,\n    CAST($2 AS DATE) AS end_date\n),\nbounds AS (\n  SELECT\n    start_date,\n    end_date,\n    (start_date - ((end_date - start_date) + 1))::date AS prior_start,\n    (start_date - 1)::date                             AS prior_end\n  FROM params\n),\nsums AS (\n  SELECT\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.start_date AND b.end_date      THEN a.spend       END),0)::numeric AS curr_spend,\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.start_date AND b.end_date      THEN a.conversions END),0)::numeric AS curr_conv,\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.prior_start AND b.prior_end    THEN a.spend       END),0)::numeric AS prior_spend,\n    COALESCE(SUM(CASE WHEN a.date BETWEEN b.prior_start AND b.prior_end    THEN a.conversions END),0)::numeric AS prior_conv,\n    MIN(b.start_date)  AS start_date,\n    MIN(b.end_date)    AS end_date,\n    MIN(b.prior_start) AS prior_start,\n    MIN(b.prior_end)   AS prior_end\n  FROM ads_spend a\n  CROSS JOIN bounds b\n)\nSELECT\n  start_date, end_date, prior_start, prior_end,\n  ROUND(curr_spend/NULLIF(curr_conv,0), 2)                                        AS cac_curr,\n  ROUND(prior_spend/NULLIF(prior_conv,0), 2)                                      AS cac_prior,\n  ROUND((curr_spend/NULLIF(curr_conv,0)) - (prior_spend/NULLIF(prior_conv,0)), 2) AS cac_delta_abs,\n  CASE WHEN (prior_spend/NULLIF(prior_conv,0)) IS NULL OR (prior_spend/NULLIF(prior_conv,0))=0 THEN NULL\n       ELSE ROUND( ((curr_spend/NULLIF(curr_conv,0)) - (prior_spend/NULLIF(prior_conv,0)))\n                  / (prior_spend/NULLIF(prior_conv,0)), 4)\n  END AS cac_delta_pct,\n  ROUND((curr_conv*100)/NULLIF(curr_spend,0), 2)                                   AS roas_curr,\n  ROUND((prior_conv*100)/NULLIF(prior_spend,0), 2)                                 AS roas_prior,\n  ROUND(((curr_conv*100)/NULLIF(curr_spend,0)) - ((prior_conv*100)/NULLIF(prior_spend,0)), 2) AS roas_delta_abs,\n  CASE WHEN ((prior_conv*100)/NULLIF(prior_spend,0)) IS NULL OR ((prior_conv*100)/NULLIF(prior_spend,0))=0 THEN NULL\n       ELSE ROUND( ( ((curr_conv*100)/NULLIF(curr_spend,0)) - ((prior_conv*100)/NULLIF(prior_spend,0)) )\n                  / ((prior_conv*100)/NULLIF(prior_spend,0)), 4)\n  END AS roas_delta_pct,\n  -- contexto útil\n  curr_spend, prior_spend, curr_conv, prior_conv\nFROM sums;\n",
+        "options": {
+          "queryReplacement": "=[{{ $json.query.start}},\n{{ $json.query.end }}]"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        208,
+        256
+      ],
+      "id": "f5d00df2-9a10-4c45-8917-c1e04606a94b",
+      "name": "SQL — KPIs (CAC/ROAS + deltas)",
+      "credentials": {
+        "postgres": {
+          "id": "Pdb5MDEOX8pSLQNJ",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = items[0].json;\nconst num = v => (v == null ? null : parseFloat(v));\nreturn [{\n  json: {\n    period: {\n      start: (r.start_date || r.period?.start || '').slice(0,10),\n      end: (r.end_date || r.period?.end || '').slice(0,10),\n      prior_start: (r.prior_start || r.period?.prior_start || '').slice(0,10),\n      prior_end: (r.prior_end || r.period?.prior_end || '').slice(0,10),\n    },\n    kpis: {\n      cac: {\n        curr: num(r.cac_curr),\n        prior: num(r.cac_prior),\n        delta_abs: num(r.cac_delta_abs),\n        delta_pct: (r.cac_delta_pct == null ? null : num(r.cac_delta_pct)),\n        delta_pct_str: (r.cac_delta_pct == null ? null : (num(r.cac_delta_pct)*100).toFixed(2) + '%'),\n      },\n      roas: {\n        curr: num(r.roas_curr),\n        prior: num(r.roas_prior),\n        delta_abs: num(r.roas_delta_abs),\n        delta_pct: (r.roas_delta_pct == null ? null : num(r.roas_delta_pct)),\n        delta_pct_str: (r.roas_delta_pct == null ? null : (num(r.roas_delta_pct)*100).toFixed(2) + '%'),\n      },\n    },\n    context: {\n      spend: { curr: num(r.curr_spend), prior: num(r.prior_spend) },\n      conversions: { curr: num(r.curr_conv), prior: num(r.prior_conv) },\n    },\n    note: (num(r.prior_spend) === 0 && num(r.prior_conv) === 0) ? 'No prior data in prior window' : null,\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        256
+      ],
+      "id": "3737be56-d3ea-4702-bc41-ba26725cb7a4",
+      "name": "Format JSON — Metrics Response"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        624,
+        256
+      ],
+      "id": "2b2efe12-984d-402c-88ea-96ed4454aa64",
+      "name": "Respond — 200 JSON"
+    },
+    {
+      "parameters": {
+        "path": "/ask",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        480
+      ],
+      "id": "bcb9001a-8964-4997-b21c-49328796ffba",
+      "name": "Webhook — /ask (GET ?q=...)",
+      "webhookId": "3a5bd33e-adba-44bc-acf4-87a9cf1ebde5"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1248,
+        480
+      ],
+      "id": "fa1449c2-747f-432a-b69d-4ab2f15684a7",
+      "name": "Respond — 200 JSON1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Function (Parse Q)": {
+      "main": [
+        [
+          {
+            "node": "Postgres (Get Range)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function (Unify Dates)": {
+      "main": [
+        [
+          {
+            "node": "Postgres – Metrics (SQL)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function (Render Answer)": {
+      "main": [
+        [
+          {
+            "node": "Respond — 200 JSON1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres – Metrics (SQL)": {
+      "main": [
+        [
+          {
+            "node": "Function (Render Answer)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres (Get Range)": {
+      "main": [
+        [
+          {
+            "node": "Function (Unify Dates)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger — Ingest": {
+      "main": [
+        [
+          {
+            "node": "SQL — Create Tables (staging, ads_spend, load_log)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SQL — Create Tables (staging, ads_spend, load_log)": {
+      "main": [
+        [
+          {
+            "node": "Set Metadata (load_date, source_file_name)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Metadata (load_date, source_file_name)": {
+      "main": [
+        [
+          {
+            "node": "Read File — CSV from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read File — CSV from Disk": {
+      "main": [
+        [
+          {
+            "node": "Parse CSV → JSON (staging schema)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse CSV → JSON (staging schema)": {
+      "main": [
+        [
+          {
+            "node": "Insert → staging_ads (bulk)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert → staging_ads (bulk)": {
+      "main": [
+        [
+          {
+            "node": "SQL — Merge to ads_spend (dedupe on natural key)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SQL — Merge to ads_spend (dedupe on natural key)": {
+      "main": [
+        [
+          {
+            "node": "SQL — Load Log & Counts (prove persistence)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SQL — Load Log & Counts (prove persistence)": {
+      "main": [
+        []
+      ]
+    },
+    "Webhook — /metrics (GET ?start&end)": {
+      "main": [
+        [
+          {
+            "node": "SQL — KPIs (CAC/ROAS + deltas)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SQL — KPIs (CAC/ROAS + deltas)": {
+      "main": [
+        [
+          {
+            "node": "Format JSON — Metrics Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format JSON — Metrics Response": {
+      "main": [
+        [
+          {
+            "node": "Respond — 200 JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook — /ask (GET ?q=...)": {
+      "main": [
+        [
+          {
+            "node": "Function (Parse Q)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "9cea67d1-c5fb-40e9-8408-a4ef8193b6f6",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3edb64e0b64f45726d5c8653be6ec3dda271c06f76ef96d6611b09a42151e9be"
+  },
+  "id": "5n9APL6aoQleen6z",
+  "tags": []
+}
