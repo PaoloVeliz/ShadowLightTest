@@ -202,7 +202,7 @@ docker exec -it pg psql -U devuser -d devtest -c "SELECT date::date AS date, pla
 3. **Results**  
    - screenshots of table and API responses
 4. **Loom video (≤ 5 min)**  
-   - approach, key nodes/decisions, demo of the two endpoints
+   - [approach, key nodes/decisions, demo of the two endpoints](https://www.loom.com/share/520131942d8b46e895b93dcc294472f1?sid=7f833337-a31a-4184-9727-3c36d51485de)
 
 ---
 
@@ -210,3 +210,5 @@ docker exec -it pg psql -U devuser -d devtest -c "SELECT date::date AS date, pla
 
 Use for evaluation/demonstration purposes. Replace datasource credentials before sharing publicly.  
 Feel free to extend with dbt models, scheduled runs (Cron node), or additional breakdowns (e.g., by platform/country/campaign).
+
+
